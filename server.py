@@ -3,19 +3,25 @@
 Ein MCP-Server (Streamable HTTP) mit einem Tool: garmin_tageswerte(tage).
 Er läuft auf trader-01 nur auf localhost und ist über einen Cloudflare Tunnel
 unter einer geheimen Adresse erreichbar. claude.ai bindet ihn als Connector ein.
+Läuft unter Windows und Linux.
 
 Ausgabe wie beim bisherigen PC-Server:
   {"rows": [{"date", "sleepH", "sleepScore", "steps", "restingHr",
              "activeKcal", "weightKg", "bodyFatPct"}], "errors": [...]}
+
+Einstellungen kommen aus Umgebungsvariablen oder aus einer Datei mit
+KEY=VALUE-Zeilen:  python server.py --config C:\\garmin-mcp\\data\\config.env
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -24,10 +30,33 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 log = logging.getLogger("garmin-mcp")
 
+
+def load_config(argv: list[str]) -> None:
+    """Liest --config <datei> und setzt fehlende Umgebungsvariablen daraus."""
+    path = None
+    if "--config" in argv:
+        i = argv.index("--config")
+        if i + 1 < len(argv):
+            path = argv[i + 1]
+    path = path or os.environ.get("GARMIN_MCP_CONFIG")
+    if not path or not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+
+load_config(sys.argv)
+
 TOKENSTORE = os.environ.get("GARMIN_TOKENSTORE", os.path.expanduser("~/.garminconnect"))
 SECRET = os.environ.get("GARMIN_MCP_SECRET", "")
 HOST = os.environ.get("GARMIN_MCP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("GARMIN_MCP_PORT", "8765"))
+ZONE = ZoneInfo(os.environ.get("GARMIN_MCP_TZ", "Europe/Zurich"))
 MAX_TAGE = 31
 
 
@@ -134,7 +163,7 @@ def _weights(api, start: str, end: str) -> dict[str, dict]:
 
 def tageswerte(tage: int) -> Antwort:
     tage = max(1, min(MAX_TAGE, int(tage or 7)))
-    heute = date.today()
+    heute = datetime.now(ZONE).date()  # Schweizer Datum, egal wie die Server-Uhr steht
     days = [(heute - timedelta(days=i)).isoformat() for i in range(tage)]
     errors: list[str] = []
 
@@ -194,8 +223,22 @@ def garmin_tageswerte(tage: int = 7) -> Antwort:
     return tageswerte(tage)
 
 
+class _HideSecret(logging.Filter):
+    """Ersetzt den geheimen Pfad in Log-Zeilen durch ***."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if SECRET:
+            if isinstance(record.args, tuple):
+                record.args = tuple(a.replace(SECRET, "***") if isinstance(a, str) else a for a in record.args)
+            if isinstance(record.msg, str):
+                record.msg = record.msg.replace(SECRET, "***")
+        return True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+        logging.getLogger(name).addFilter(_HideSecret())
     if len(SECRET) < 24:
         raise SystemExit("GARMIN_MCP_SECRET fehlt oder ist zu kurz (mind. 24 Zeichen).")
     path = f"/{SECRET}/mcp"

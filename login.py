@@ -1,11 +1,11 @@
-"""Einmalige Garmin-Anmeldung auf dem Server.
+"""Einmalige Garmin-Anmeldung auf dem Server (Windows oder Linux).
 
 Fragt E-Mail, Passwort und falls nötig den MFA-Code ab und speichert nur die
 Login-Tokens (nicht das Passwort) im Token-Ordner. Danach braucht der Dienst
 kein Passwort mehr.
 
-Aufruf (installiert durch install.sh):
-    sudo garmin-login
+Windows:  C:\\garmin-mcp\\garmin-login.cmd  (als Administrator)
+Linux:    sudo garmin-login
 """
 
 from __future__ import annotations
@@ -13,15 +13,34 @@ from __future__ import annotations
 import getpass
 import os
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-TOKENSTORE = os.environ.get("GARMIN_TOKENSTORE", os.path.expanduser("~/.garminconnect"))
+
+def load_config(argv: list[str]) -> None:
+    path = None
+    if "--config" in argv:
+        i = argv.index("--config")
+        if i + 1 < len(argv):
+            path = argv[i + 1]
+    path = path or os.environ.get("GARMIN_MCP_CONFIG")
+    if not path or not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 
 def main() -> int:
+    load_config(sys.argv)
+    tokenstore = os.environ.get("GARMIN_TOKENSTORE", os.path.expanduser("~/.garminconnect"))
     from garminconnect import Garmin
 
     print("Garmin-Anmeldung für die Health-App")
-    print(f"Tokens werden gespeichert in: {TOKENSTORE}\n")
+    print(f"Tokens werden gespeichert in: {tokenstore}\n")
     email = input("Garmin E-Mail: ").strip()
     password = getpass.getpass("Garmin Passwort (wird nicht angezeigt): ")
 
@@ -30,15 +49,19 @@ def main() -> int:
 
     api = Garmin(email=email, password=password, prompt_mfa=mfa)
     try:
-        api.login(TOKENSTORE)
+        api.login(tokenstore)
     except Exception as e:
         print(f"\nAnmeldung fehlgeschlagen: {e}")
         print("Prüfe E-Mail und Passwort. Bei 'Too many' ein paar Minuten warten.")
         return 1
-    api.client.dump(TOKENSTORE)
-    name = getattr(api, "display_name", None) or getattr(api, "full_name", None) or "ok"
-    print(f"\nAngemeldet ({name}). Tokens gespeichert.")
-    print("Test: Schritte heute =", (api.get_user_summary(__import__('datetime').date.today().isoformat()) or {}).get("totalSteps"))
+    api.client.dump(tokenstore)
+    print("\nAngemeldet. Tokens gespeichert.")
+    heute = datetime.now(ZoneInfo(os.environ.get("GARMIN_MCP_TZ", "Europe/Zurich"))).date().isoformat()
+    try:
+        steps = (api.get_user_summary(heute) or {}).get("totalSteps")
+        print(f"Test: Schritte heute = {steps}")
+    except Exception as e:
+        print(f"Test-Abruf fehlgeschlagen: {e}")
     return 0
 
 
