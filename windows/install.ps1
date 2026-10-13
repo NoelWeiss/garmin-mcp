@@ -22,17 +22,40 @@ function Install-GarminMcp {
     if (-not $isAdmin) { Write-Host 'Bitte PowerShell als Administrator starten (Rechtsklick > Als Administrator ausführen).' -ForegroundColor Red; return }
 
     Say '1/6 Python prüfen'
-    $py = $null
-    foreach ($c in @("C:\Program Files\Python312\python.exe", "C:\Program Files\Python313\python.exe")) { if (Test-Path $c) { $py = $c; break } }
+    # Vorhandenes Python 3.10+ über die Registry finden (egal in welchem Ordner)
+    function Find-Python {
+        foreach ($c in @("$Root\python\python.exe", 'C:\Program Files\Python312\python.exe', 'C:\Program Files\Python313\python.exe')) {
+            if (Test-Path $c) { return $c }
+        }
+        foreach ($hive in 'HKLM:', 'HKCU:') {
+            foreach ($v in '3.13', '3.12', '3.11', '3.10') {
+                $k = "$hive\SOFTWARE\Python\PythonCore\$v\InstallPath"
+                if (Test-Path $k) {
+                    $p = (Get-ItemProperty $k -ErrorAction SilentlyContinue).ExecutablePath
+                    if (-not $p) { $d = (Get-Item $k).GetValue(''); if ($d) { $p = Join-Path $d 'python.exe' } }
+                    if ($p -and (Test-Path $p)) { return $p }
+                }
+            }
+        }
+        return $null
+    }
+    $py = Find-Python
     if (-not $py) {
         Write-Host "Python $PyVersion wird installiert (2-3 Minuten)..."
         $inst = "$env:TEMP\python-$PyVersion-amd64.exe"
         Invoke-WebRequest -UseBasicParsing "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-amd64.exe" -OutFile $inst
-        Start-Process $inst -ArgumentList '/quiet','InstallAllUsers=1','PrependPath=0','Include_test=0','Include_launcher=0','TargetDir=C:\Program Files\Python312' -Wait
-        Remove-Item $inst -Force
-        $py = 'C:\Program Files\Python312\python.exe'
-        if (-not (Test-Path $py)) { Write-Host 'Python-Installation fehlgeschlagen.' -ForegroundColor Red; return }
+        $log = "$env:TEMP\python-install.log"
+        $pyArgs = "/quiet /log `"$log`" InstallAllUsers=1 PrependPath=0 Include_test=0 Include_launcher=0 TargetDir=$Root\python"
+        $proc = Start-Process $inst -ArgumentList $pyArgs -Wait -PassThru
+        Remove-Item $inst -Force -ErrorAction SilentlyContinue
+        $py = Find-Python
+        if (-not $py) {
+            Write-Host "Python-Installation fehlgeschlagen (Code $($proc.ExitCode)). Letzte Zeilen aus $log :" -ForegroundColor Red
+            if (Test-Path $log) { Get-Content $log -Tail 15 }
+            return
+        }
     }
+    Write-Host "Python: $py"
     & $py --version
 
     Say '2/6 Programm herunterladen'
